@@ -1,0 +1,127 @@
+{
+  "run_id": "c6dc34b6-cce9-49c2-be81-e65f2659c9b3",
+  "generated_at_utc": "2026-10-29T14:09:50.805024+00:00",
+  "input_files": {
+    "orders": "data\\orders.csv",
+    "products": "data\\products.csv",
+    "customers": "data\\customers.csv"
+  },
+  "counts": {
+    "input": 14,
+    "accepted": 10,
+    "rejected": 3,
+    "duplicate_rows_removed": 1
+  },
+  "reconciliation": {
+    "input_count": 14,
+    "output_count": 10,
+    "rejected_count": 3,
+    "duplicate_rows_removed": 1,
+    "unaccounted_count": 0
+  },
+  "rejections_by_reason": [
+    {
+      "reject_reason": "non_positive_quantity",
+      "count": 1
+    },
+    {
+      "reject_reason": "unknown_customer_reference",
+      "count": 1
+    },
+    {
+      "reject_reason": "unknown_product_reference",
+      "count": 1
+    }
+  ],
+  "sales_by_date_and_category": [
+    {
+      "order_date": "2025-01-01",
+      "category": "home",
+      "order_count": 1,
+      "units_sold": 1,
+      "gross_revenue": "10.00"
+    },
+    {
+      "order_date": "2025-01-20",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 2,
+      "gross_revenue": "716.58"
+    },
+    {
+      "order_date": "2025-01-22",
+      "category": "home",
+      "order_count": 1,
+      "units_sold": 2,
+      "gross_revenue": "234.20"
+    },
+    {
+      "order_date": "2025-02-27",
+      "category": "home",
+      "order_count": 1,
+      "units_sold": 3,
+      "gross_revenue": "1244.61"
+    },
+    {
+      "order_date": "2025-03-16",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 1,
+      "gross_revenue": "295.66"
+    },
+    {
+      "order_date": "2025-04-27",
+      "category": "home",
+      "order_count": 1,
+      "units_sold": 3,
+      "gross_revenue": "418.98"
+    },
+    {
+      "order_date": "2025-09-03",
+      "category": "books",
+      "order_count": 1,
+      "units_sold": 1,
+      "gross_revenue": "190.58"
+    },
+    {
+      "order_date": "2025-09-08",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 3,
+      "gross_revenue": "1211.28"
+    },
+    {
+      "order_date": "2025-11-02",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 4,
+      "gross_revenue": "1180.16"
+    },
+    {
+      "order_date": "2025-12-01",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 1,
+      "gross_revenue": "486.58"
+    }
+  ],
+  "benchmark": {
+    "scope": "pipeline transformations and count actions; cached input, excluding CSV reads and output publishing",
+    "warmup_runs_per_mode": 0,
+    "measured_repeats_per_mode": 1,
+    "baseline_seconds": [
+      11.09461790000205
+    ],
+    "optimized_seconds": [
+      7.671805499994662
+    ],
+    "baseline_median_seconds": 11.09461790000205,
+    "optimized_median_seconds": 7.671805499994662,
+    "median_speedup": 1.4461547415415796,
+    "accepted_and_quarantine_outputs_equal": true
+  },
+  "outputs": {
+    "orders": "data\\output\\orders",
+    "quarantine": "data\\output\\quarantine"
+  }
+}
