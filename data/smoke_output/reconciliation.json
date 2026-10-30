@@ -1,6 +1,6 @@
 {
-  "run_id": "4a4b8fcd-bf7b-4759-a05a-29fdf4f4fb7e",
-  "generated_at_utc": "2026-10-29T16:06:34.736971+00:00",
+  "run_id": "a4abaf63-d0df-4a74-b778-398ef762d565",
+  "generated_at_utc": "2026-10-30T06:15:49.479187+00:00",
   "input_files": {
     "orders": "data\\smoke_inputs\\orders.csv",
     "products": "data\\smoke_inputs\\products.csv",
@@ -110,14 +110,14 @@
     "warmup_runs_per_mode": 0,
     "measured_repeats_per_mode": 1,
     "baseline_seconds": [
-      8.447779399997671
+      9.346678800007794
     ],
     "optimized_seconds": [
-      6.9606010999996215
+      7.636954000015976
     ],
-    "baseline_median_seconds": 8.447779399997671,
-    "optimized_median_seconds": 6.9606010999996215,
-    "median_speedup": 1.213656590664006,
+    "baseline_median_seconds": 9.346678800007794,
+    "optimized_median_seconds": 7.636954000015976,
+    "median_speedup": 1.2238752256447063,
     "accepted_and_quarantine_outputs_equal": true
   },
   "outputs": {

@@ -1,0 +1,137 @@
+{
+  "run_id": "41b93e4b-4ef4-4112-a4e1-79753f3c2117",
+  "status": "SUCCESS",
+  "generated_at_utc": "2026-10-30T10:48:24.430947+00:00",
+  "timezone": "UTC",
+  "timings": {
+    "started_at": "2026-10-30T10:48:14.412428+00:00",
+    "transform_ended_at": "2026-10-30T10:48:22.715315+00:00",
+    "publish_ended_at": "2026-10-30T10:48:24.430947+00:00",
+    "transform_seconds": 8.302047099976335,
+    "pipeline_seconds_including_dataset_publish": 10.01826670000446
+  },
+  "input_files": {
+    "orders": "data\\orders.csv",
+    "products": "data\\products.csv",
+    "customers": "data\\customers.csv"
+  },
+  "counts": {
+    "input": 14,
+    "accepted": 10,
+    "rejected": 3,
+    "duplicate_rows_removed": 1
+  },
+  "reconciliation": {
+    "input_count": 14,
+    "output_count": 10,
+    "rejected_count": 3,
+    "duplicate_rows_removed": 1,
+    "unaccounted_count": 0
+  },
+  "rejections_by_reason": [
+    {
+      "reject_reason": "non_positive_quantity",
+      "count": 1
+    },
+    {
+      "reject_reason": "unknown_customer_reference",
+      "count": 1
+    },
+    {
+      "reject_reason": "unknown_product_reference",
+      "count": 1
+    }
+  ],
+  "sales_by_date_and_category": [
+    {
+      "order_date": "2025-01-01",
+      "category": "home",
+      "order_count": 1,
+      "units_sold": 1,
+      "gross_revenue": "10.00"
+    },
+    {
+      "order_date": "2025-01-20",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 2,
+      "gross_revenue": "716.58"
+    },
+    {
+      "order_date": "2025-01-22",
+      "category": "home",
+      "order_count": 1,
+      "units_sold": 2,
+      "gross_revenue": "234.20"
+    },
+    {
+      "order_date": "2025-02-27",
+      "category": "home",
+      "order_count": 1,
+      "units_sold": 3,
+      "gross_revenue": "1244.61"
+    },
+    {
+      "order_date": "2025-03-16",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 1,
+      "gross_revenue": "295.66"
+    },
+    {
+      "order_date": "2025-04-27",
+      "category": "home",
+      "order_count": 1,
+      "units_sold": 3,
+      "gross_revenue": "418.98"
+    },
+    {
+      "order_date": "2025-09-03",
+      "category": "books",
+      "order_count": 1,
+      "units_sold": 1,
+      "gross_revenue": "190.58"
+    },
+    {
+      "order_date": "2025-09-08",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 3,
+      "gross_revenue": "1211.28"
+    },
+    {
+      "order_date": "2025-11-02",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 4,
+      "gross_revenue": "1180.16"
+    },
+    {
+      "order_date": "2025-12-01",
+      "category": "electronics",
+      "order_count": 1,
+      "units_sold": 1,
+      "gross_revenue": "486.58"
+    }
+  ],
+  "benchmark": {
+    "scope": "pipeline transformations and count actions; cached input, excluding CSV reads and output publishing",
+    "warmup_runs_per_mode": 0,
+    "measured_repeats_per_mode": 1,
+    "baseline_seconds": [
+      10.994593799987342
+    ],
+    "optimized_seconds": [
+      8.225616699986858
+    ],
+    "baseline_median_seconds": 10.994593799987342,
+    "optimized_median_seconds": 8.225616699986858,
+    "median_speedup": 1.336628510784475,
+    "accepted_and_quarantine_outputs_equal": true
+  },
+  "outputs": {
+    "orders": "data\\output\\runs\\41b93e4b-4ef4-4112-a4e1-79753f3c2117\\orders",
+    "quarantine": "data\\output\\runs\\41b93e4b-4ef4-4112-a4e1-79753f3c2117\\quarantine",
+    "duplicates": "data\\output\\runs\\41b93e4b-4ef4-4112-a4e1-79753f3c2117\\duplicates"
+  }
+}

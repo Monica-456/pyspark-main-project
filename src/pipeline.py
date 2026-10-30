@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
-from pyspark.sql.types import DecimalType, IntegerType
+from pyspark.sql.types import DecimalType
 
 
 LOGGER = logging.getLogger(__name__)
@@ -65,34 +65,66 @@ def _validate_dimension(
     return clean
 
 
-def _clean_orders(raw_orders: DataFrame) -> tuple[DataFrame, DataFrame]:
+def _clean_orders(
+    raw_orders: DataFrame,
+) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
     """Apply the raw order contract and split malformed rows from valid rows."""
     _validate_columns(raw_orders, ORDER_INPUT_COLUMNS, "orders")
     raw_record = F.to_json(F.struct(*[F.col(column) for column in raw_orders.columns]))
+    payload_record = F.to_json(F.struct(*[F.col(column) for column in ORDER_COLUMNS]))
+    source_path = (
+        F.col("_source_path").cast("string")
+        if "_source_path" in raw_orders.columns
+        else F.lit(None).cast("string")
+    )
+    identified = raw_orders.withColumn("_raw_record", raw_record).withColumn(
+        "_source_path", source_path
+    )
+    identity_window = Window.partitionBy("_raw_record").orderBy(F.lit(1))
+    identified = identified.withColumn(
+        "_source_record_id",
+        F.concat(
+            F.sha2(F.col("_raw_record"), 256),
+            F.lit("-"),
+            F.row_number().over(identity_window).cast("string"),
+        ),
+    )
     quantity_text = F.trim(F.col("quantity").cast("string"))
     price_text = F.trim(F.col("unit_price").cast("string"))
-    typed = raw_orders.withColumn("raw_record", raw_record).select(
+    typed = identified.select(
         F.trim(F.col("order_id").cast("string")).alias("order_id"),
         F.trim(F.col("customer_id").cast("string")).alias("customer_id"),
         F.trim(F.col("product_id").cast("string")).alias("product_id"),
-        F.when(quantity_text.rlike(r"^[+-]?\d+$"), quantity_text.cast(IntegerType()))
-        .otherwise(F.lit(None).cast(IntegerType()))
-        .alias("quantity"),
-        F.when(price_text.rlike(_PRICE_PATTERN), price_text.cast(DecimalType(12, 2)))
+        F.expr("try_cast(trim(cast(quantity as string)) as int)").alias("quantity"),
+        F.when(
+            price_text.rlike(_PRICE_PATTERN),
+            F.expr("try_cast(trim(cast(unit_price as string)) as decimal(12, 2))"),
+        )
         .otherwise(F.lit(None).cast(DecimalType(12, 2)))
         .alias("unit_price"),
-        F.to_timestamp(F.trim(F.col("event_timestamp").cast("string"))).alias("event_timestamp"),
+        F.expr(
+            "try_to_timestamp(trim(cast(event_timestamp as string)))"
+        ).alias("event_timestamp"),
         F.coalesce(
             F.trim(F.col("source_file").cast("string")),
             F.lit("unknown"),
         ).alias("source_file"),
+        F.col("_source_record_id").alias("source_record_id"),
+        F.col("_source_path").alias("source_path"),
+        F.col("_raw_record").alias("raw_record"),
+        payload_record.alias("_payload_record"),
+        (
+            F.col("_corrupt_record").cast("string")
+            if "_corrupt_record" in raw_orders.columns
+            else F.lit(None).cast("string")
+        ).alias("_corrupt_record"),
         quantity_text.alias("_raw_quantity"),
         price_text.alias("_raw_unit_price"),
         F.trim(F.col("event_timestamp").cast("string")).alias("_raw_event_timestamp"),
-        F.col("raw_record"),
     )
     reason = (
-        F.when(F.col("order_id").isNull() | (F.col("order_id") == ""), "missing_order_id")
+        F.when(F.col("_corrupt_record").isNotNull(), "malformed_csv_record")
+        .when(F.col("order_id").isNull() | (F.col("order_id") == ""), "missing_order_id")
         .when(F.col("customer_id").isNull() | (F.col("customer_id") == ""), "missing_customer_id")
         .when(F.col("product_id").isNull() | (F.col("product_id") == ""), "missing_product_id")
         .when(F.col("_raw_quantity").isNull() | (F.col("_raw_quantity") == ""), "invalid_quantity")
@@ -109,10 +141,18 @@ def _clean_orders(raw_orders: DataFrame) -> tuple[DataFrame, DataFrame]:
     )
     assessed = typed.withColumn("reject_reason", reason)
     rejected = assessed.filter(F.col("reject_reason").isNotNull()).select(
-        *[F.col(column) for column in ORDER_COLUMNS], "raw_record", "reject_reason"
+        *[F.col(column) for column in ORDER_COLUMNS],
+        "source_record_id",
+        "source_path",
+        "raw_record",
+        "reject_reason",
     )
     valid = assessed.filter(F.col("reject_reason").isNull()).drop(
-        "reject_reason", "_raw_quantity", "_raw_unit_price", "_raw_event_timestamp"
+        "reject_reason",
+        "_raw_quantity",
+        "_raw_unit_price",
+        "_raw_event_timestamp",
+        "_corrupt_record",
     )
 
     # All output-affecting fields participate, so even timestamp ties have a stable winner.
@@ -124,13 +164,45 @@ def _clean_orders(raw_orders: DataFrame) -> tuple[DataFrame, DataFrame]:
         "quantity",
         "unit_price",
         "raw_record",
+        "source_record_id",
     )
-    valid = (
+    winner_window = window.rowsBetween(
+        Window.unboundedPreceding, Window.unboundedFollowing
+    )
+    ranked = (
         valid.withColumn("_row_number", F.row_number().over(window))
-        .filter(F.col("_row_number") == 1)
-        .drop("_row_number")
+        .withColumn(
+            "_winner_source_record_id",
+            F.first("source_record_id").over(winner_window),
+        )
+        .withColumn(
+            "_winner_payload_record",
+            F.first("_payload_record").over(winner_window),
+        )
     )
-    return valid, rejected
+    duplicates = ranked.filter(F.col("_row_number") > 1).select(
+        *[F.col(column) for column in ORDER_COLUMNS],
+        "source_record_id",
+        "source_path",
+        "raw_record",
+        F.col("_winner_source_record_id").alias("winner_source_record_id"),
+        F.when(
+            F.col("_payload_record") == F.col("_winner_payload_record"),
+            "exact_duplicate",
+        )
+        .otherwise("conflicting_duplicate")
+        .alias("duplicate_reason"),
+    )
+    winners = ranked.filter(F.col("_row_number") == 1).drop(
+        "_row_number",
+        "_winner_source_record_id",
+        "_winner_payload_record",
+        "_payload_record",
+    )
+    source_ids = identified.select("_source_record_id").withColumnRenamed(
+        "_source_record_id", "source_record_id"
+    )
+    return winners, rejected, duplicates, source_ids
 
 
 def _enrich(
@@ -145,7 +217,7 @@ def _enrich(
         customer_side, "customer_id", "left"
     )
     return joined.withColumn(
-        "revenue", (F.col("quantity") * F.col("unit_price")).cast(DecimalType(18, 2))
+        "revenue", (F.col("quantity") * F.col("unit_price")).cast(DecimalType(22, 2))
     )
 
 
@@ -249,7 +321,7 @@ def run_pipeline(
             else raw_orders.sparkSession.createDataFrame([], "customer_id string")
         )
         clean_customers = clean_customers.withColumn("_customer_exists", F.lit(True))
-        valid, rejected = _clean_orders(raw_orders)
+        valid, rejected, duplicates, source_ids = _clean_orders(raw_orders)
         matched = _enrich(valid, clean_products, clean_customers, optimized=optimized)
         if customers is None:
             matched = matched.withColumn("_customer_exists", F.lit(True))
@@ -260,6 +332,8 @@ def run_pipeline(
 
         product_rejects = matched.filter(F.col("category").isNull()).select(
             *[F.col(column) for column in ORDER_COLUMNS],
+            "source_record_id",
+            "source_path",
             "raw_record",
             F.lit("unknown_product_reference").alias("reject_reason"),
         )
@@ -267,22 +341,98 @@ def run_pipeline(
             F.col("category").isNotNull() & ~F.col("_customer_exists")
         ).select(
             *[F.col(column) for column in ORDER_COLUMNS],
+            "source_record_id",
+            "source_path",
             "raw_record",
             F.lit("unknown_customer_reference").alias("reject_reason"),
         )
+        revenue_rejects = matched.filter(
+            F.col("category").isNotNull()
+            & F.col("_customer_exists")
+            & F.col("revenue").isNull()
+        ).select(
+            *[F.col(column) for column in ORDER_COLUMNS],
+            "source_record_id",
+            "source_path",
+            "raw_record",
+            F.lit("revenue_overflow").alias("reject_reason"),
+        )
         accepted = (
-            matched.filter(F.col("category").isNotNull() & F.col("_customer_exists"))
+            matched.filter(
+                F.col("category").isNotNull()
+                & F.col("_customer_exists")
+                & F.col("revenue").isNotNull()
+            )
             .drop("_customer_exists")
             .withColumn("run_id", F.lit(run_id))
         )
-        quarantine = rejected.unionByName(product_rejects).unionByName(customer_rejects)
+        quarantine = (
+            rejected.unionByName(product_rejects)
+            .unionByName(customer_rejects)
+            .unionByName(revenue_rejects)
+            .withColumn("run_id", F.lit(run_id))
+        )
+        duplicates = duplicates.withColumn("run_id", F.lit(run_id))
 
-        input_count = raw_orders.count()
-        output_count = accepted.count()
-        rejected_count = quarantine.count()
-        duplicate_rows_removed = input_count - output_count - rejected_count
-        if duplicate_rows_removed < 0:
-            raise RuntimeError("Pipeline accounting produced a negative duplicate count")
+        disposition_rows = (
+            source_ids.select("source_record_id", F.lit("input").alias("_disposition"))
+            .unionByName(
+                accepted.select(
+                    "source_record_id", F.lit("accepted").alias("_disposition")
+                )
+            )
+            .unionByName(
+                quarantine.select(
+                    "source_record_id", F.lit("rejected").alias("_disposition")
+                )
+            )
+            .unionByName(
+                duplicates.select(
+                    "source_record_id", F.lit("duplicate").alias("_disposition")
+                )
+            )
+        )
+        by_source = disposition_rows.groupBy("source_record_id").agg(
+            F.sum(F.when(F.col("_disposition") == "input", 1).otherwise(0)).alias(
+                "_input_count"
+            ),
+            F.sum(F.when(F.col("_disposition") == "accepted", 1).otherwise(0)).alias(
+                "_accepted_count"
+            ),
+            F.sum(F.when(F.col("_disposition") == "rejected", 1).otherwise(0)).alias(
+                "_rejected_count"
+            ),
+            F.sum(F.when(F.col("_disposition") == "duplicate", 1).otherwise(0)).alias(
+                "_duplicate_count"
+            ),
+        )
+        disposition_stats = by_source.agg(
+            F.sum("_input_count").alias("input_count"),
+            F.sum("_accepted_count").alias("output_count"),
+            F.sum("_rejected_count").alias("rejected_count"),
+            F.sum("_duplicate_count").alias("duplicate_rows_removed"),
+            F.sum(
+                F.when(
+                    (F.col("_input_count") != 1)
+                    | (
+                        F.col("_accepted_count")
+                        + F.col("_rejected_count")
+                        + F.col("_duplicate_count")
+                        != 1
+                    ),
+                    1,
+                ).otherwise(0)
+            ).alias("coverage_errors"),
+        ).first()
+        input_count = disposition_stats.input_count or 0
+        output_count = disposition_stats.output_count or 0
+        rejected_count = disposition_stats.rejected_count or 0
+        duplicate_rows_removed = disposition_stats.duplicate_rows_removed or 0
+        if disposition_stats.coverage_errors:
+            raise RuntimeError(
+                "Pipeline source coverage failed: each input record must have exactly "
+                "one accepted, rejected, or duplicate disposition"
+            )
 
         sales_summary = accepted.groupBy(
             F.to_date("event_timestamp").alias("order_date"), "category"
@@ -291,22 +441,27 @@ def run_pipeline(
             F.sum("quantity").alias("units_sold"),
             F.sum("revenue").alias("gross_revenue"),
         ).orderBy("order_date", "category")
+        if sales_summary.filter(
+            F.col("gross_revenue").isNull() | F.col("units_sold").isNull()
+        ).limit(1).count():
+            raise RuntimeError("Sales aggregate overflowed its supported numeric range")
         rejection_summary = quarantine.groupBy("reject_reason").count().orderBy("reject_reason")
         result = {
             "run_id": run_id,
             "started_at": started_at.isoformat(),
-            "elapsed_seconds": time.perf_counter() - started_clock,
             "input_count": input_count,
             "output_count": output_count,
             "rejected_count": rejected_count,
             "duplicate_rows_removed": duplicate_rows_removed,
             "accepted": accepted,
             "rejected": quarantine,
+            "duplicates": duplicates,
             "sales_summary": sales_summary,
             "rejection_summary": rejection_summary,
         }
         reconciliation(result).first()
-        result["ended_at"] = datetime.now(timezone.utc).isoformat()
+        result["transform_ended_at"] = datetime.now(timezone.utc).isoformat()
+        result["transform_elapsed_seconds"] = time.perf_counter() - started_clock
 
         outputs = []
         if output_path is not None:
@@ -314,6 +469,8 @@ def run_pipeline(
         if reject_path is not None:
             outputs.append((quarantine, reject_path, False))
         _publish_transactionally(outputs, run_id, output_partitions)
+        result["publish_ended_at"] = datetime.now(timezone.utc).isoformat()
+        result["elapsed_seconds"] = time.perf_counter() - started_clock
         LOGGER.info(
             "Pipeline run %s complete: input=%d output=%d rejected=%d duplicates_removed=%d",
             run_id,
@@ -354,5 +511,7 @@ def reconciliation(result: dict[str, Any]) -> DataFrame:
         ],
     )
     if unaccounted != 0:
-        raise RuntimeError(f"Pipeline reconciliation failed: {unaccounted} unaccounted rows")
+        raise RuntimeError(
+            f"Pipeline reconciliation failed: {unaccounted} unaccounted rows"
+        )
     return report

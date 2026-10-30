@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
+import shutil
 import statistics
 import sys
 import tempfile
@@ -14,6 +16,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, StructField, StructType
 
 from src.generator import generate_data
@@ -30,12 +33,33 @@ ORDERS_SCHEMA = StructType(
         StructField("unit_price", StringType(), True),
         StructField("event_timestamp", StringType(), True),
         StructField("source_file", StringType(), True),
+        StructField("_corrupt_record", StringType(), True),
     ]
 )
 PRODUCTS_SCHEMA = StructType(
-    [StructField("product_id", StringType(), True), StructField("category", StringType(), True)]
+    [
+        StructField("product_id", StringType(), True),
+        StructField("category", StringType(), True),
+        StructField("_corrupt_record", StringType(), True),
+    ]
 )
-CUSTOMERS_SCHEMA = StructType([StructField("customer_id", StringType(), True)])
+CUSTOMERS_SCHEMA = StructType(
+    [
+        StructField("customer_id", StringType(), True),
+        StructField("_corrupt_record", StringType(), True),
+    ]
+)
+ORDERS_HEADER = [
+    "order_id",
+    "customer_id",
+    "product_id",
+    "quantity",
+    "unit_price",
+    "event_timestamp",
+    "source_file",
+]
+PRODUCTS_HEADER = ["product_id", "category"]
+CUSTOMERS_HEADER = ["customer_id"]
 
 
 def _assert_same_rows(left: DataFrame, right: DataFrame, name: str) -> None:
@@ -111,12 +135,76 @@ def _write_report(path: Path, report: dict) -> None:
             os.unlink(temporary_path)
 
 
+def _read_csv(
+    spark: SparkSession,
+    path: Path,
+    schema: StructType,
+    expected_header: list[str],
+) -> DataFrame:
+    with path.open(newline="", encoding="utf-8-sig") as file:
+        try:
+            header = next(csv.reader(file))
+        except StopIteration as error:
+            raise ValueError(f"CSV file is empty: {path}") from error
+    if len(header) != len(set(header)):
+        raise ValueError(f"Invalid CSV header in {path}: duplicate header names")
+    if header != expected_header:
+        raise ValueError(
+            f"Invalid CSV header in {path}; expected {expected_header}, got {header}"
+        )
+    return (
+        spark.read.schema(schema)
+        .option("header", True)
+        .option("enforceSchema", True)
+        .option("mode", "PERMISSIVE")
+        .option("columnNameOfCorruptRecord", "_corrupt_record")
+        .csv(str(path))
+        .withColumn("_source_path", F.input_file_name())
+    )
+
+
+def _publish_generation(
+    output_dir: Path,
+    staging_dir: Path,
+    run_id: str,
+    report: dict,
+) -> Path:
+    runs_dir = output_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    generation_dir = runs_dir / run_id
+    if generation_dir.exists():
+        raise FileExistsError(f"Run generation already exists: {generation_dir}")
+
+    report_path = staging_dir / "reconciliation.json"
+    _write_report(report_path, report)
+    staging_dir.replace(generation_dir)
+    _write_report(
+        output_dir / "active-run.json",
+        {
+            "status": "SUCCESS",
+            "run_id": run_id,
+            "generation": str(generation_dir),
+            "report": str(generation_dir / "reconciliation.json"),
+        },
+    )
+    return generation_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--records", type=int, default=100_000, help="number of valid synthetic orders")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--orders-path", default=None)
+    parser.add_argument("--products-path", default=None)
+    parser.add_argument("--customers-path", default=None)
+    parser.add_argument(
+        "--generate-demo",
+        action="store_true",
+        help="explicitly generate demo input files before processing",
+    )
     parser.add_argument("--output-dir", default="data/output")
+    parser.add_argument("--timezone", default="UTC", help="Spark reporting timezone")
     parser.add_argument("--benchmark-repeats", type=int, default=3)
     parser.add_argument("--warmup-runs", type=int, default=1)
     parser.add_argument("--shuffle-partitions", type=int, default=8)
@@ -137,40 +225,44 @@ def main() -> None:
     )
     spark = None
     orders = products = customers = None
+    staging_dir: Path | None = None
     try:
         os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
         os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
-        orders_path, products_path, customers_path = generate_data(
-            args.data_dir, args.records, args.seed
-        )
+        if args.generate_demo:
+            orders_path, products_path, customers_path = generate_data(
+                args.data_dir, args.records, args.seed
+            )
+        else:
+            data_dir = Path(args.data_dir)
+            orders_path = Path(args.orders_path) if args.orders_path else data_dir / "orders.csv"
+            products_path = (
+                Path(args.products_path) if args.products_path else data_dir / "products.csv"
+            )
+            customers_path = (
+                Path(args.customers_path)
+                if args.customers_path
+                else data_dir / "customers.csv"
+            )
         spark = (
             SparkSession.builder.appName("pyspark-order-pipeline")
             .master("local[*]")
             .config("spark.sql.shuffle.partitions", str(args.shuffle_partitions))
+            .config("spark.sql.session.timeZone", args.timezone)
             .getOrCreate()
         )
+        spark.conf.set("spark.sql.session.timeZone", args.timezone)
         spark.sparkContext.setLogLevel("WARN")
-        orders = (
-            spark.read.schema(ORDERS_SCHEMA)
-            .option("header", True)
-            .option("mode", "PERMISSIVE")
-            .csv(str(orders_path))
-            .cache()
-        )
-        products = (
-            spark.read.schema(PRODUCTS_SCHEMA)
-            .option("header", True)
-            .option("mode", "PERMISSIVE")
-            .csv(str(products_path))
-            .cache()
-        )
-        customers = (
-            spark.read.schema(CUSTOMERS_SCHEMA)
-            .option("header", True)
-            .option("mode", "PERMISSIVE")
-            .csv(str(customers_path))
-            .cache()
-        )
+        orders = _read_csv(spark, orders_path, ORDERS_SCHEMA, ORDERS_HEADER).cache()
+        products = _read_csv(spark, products_path, PRODUCTS_SCHEMA, PRODUCTS_HEADER)
+        customers = _read_csv(spark, customers_path, CUSTOMERS_SCHEMA, CUSTOMERS_HEADER)
+        for name, frame in (("products", products), ("customers", customers)):
+            if frame.filter(F.col("_corrupt_record").isNotNull()).select(
+                *frame.columns
+            ).limit(1).count():
+                raise ValueError(f"{name} CSV contains a malformed structural record")
+        products = products.drop("_corrupt_record", "_source_path").cache()
+        customers = customers.drop("_corrupt_record", "_source_path").cache()
         input_count = orders.count()
         product_count = products.count()
         customer_count = customers.count()
@@ -189,13 +281,15 @@ def main() -> None:
 
         output_dir = Path(args.output_dir)
         run_id = str(uuid4())
+        staging_dir = output_dir / "runs" / f".staging-{run_id}"
+        staging_dir.mkdir(parents=True, exist_ok=False)
         final_result = run_pipeline(
             orders,
             products,
             customers=customers,
             optimized=True,
-            output_path=str(output_dir / "orders"),
-            reject_path=str(output_dir / "quarantine"),
+            output_path=str(staging_dir / "orders"),
+            reject_path=str(staging_dir / "quarantine"),
             run_id=run_id,
             output_partitions=args.output_partitions,
         )
@@ -207,12 +301,23 @@ def main() -> None:
             "published accepted",
         )
         _assert_same_rows(
-            final_baseline["rejected"], final_result["rejected"], "published quarantine"
+            final_baseline["rejected"].drop("run_id"),
+            final_result["rejected"].drop("run_id"),
+            "published quarantine",
         )
 
         report = {
             "run_id": run_id,
-            "generated_at_utc": final_result["ended_at"],
+            "status": "SUCCESS",
+            "generated_at_utc": final_result["publish_ended_at"],
+            "timezone": args.timezone,
+            "timings": {
+                "started_at": final_result["started_at"],
+                "transform_ended_at": final_result["transform_ended_at"],
+                "publish_ended_at": final_result["publish_ended_at"],
+                "transform_seconds": final_result["transform_elapsed_seconds"],
+                "pipeline_seconds_including_dataset_publish": final_result["elapsed_seconds"],
+            },
             "input_files": {
                 "orders": str(orders_path),
                 "products": str(products_path),
@@ -245,12 +350,28 @@ def main() -> None:
                 "accepted_and_quarantine_outputs_equal": True,
             },
             "outputs": {
-                "orders": str(output_dir / "orders"),
-                "quarantine": str(output_dir / "quarantine"),
+                "orders": str(output_dir / "runs" / run_id / "orders"),
+                "quarantine": str(output_dir / "runs" / run_id / "quarantine"),
+                "duplicates": str(output_dir / "runs" / run_id / "duplicates"),
             },
         }
-        report_path = output_dir / "reconciliation.json"
-        _write_report(report_path, report)
+        final_result["duplicates"].write.mode("errorifexists").parquet(
+            str(staging_dir / "duplicates")
+        )
+        for name, result_frame in (
+            ("orders", final_result["accepted"]),
+            ("quarantine", final_result["rejected"]),
+            ("duplicates", final_result["duplicates"]),
+        ):
+            persisted = spark.read.parquet(str(staging_dir / name)).select(
+                *result_frame.columns
+            )
+            if persisted.count() != result_frame.count():
+                raise RuntimeError(f"Persisted {name} row count does not match the run result")
+            _assert_same_rows(result_frame, persisted, f"persisted {name}")
+        generation_dir = _publish_generation(output_dir, staging_dir, run_id, report)
+        staging_dir = None
+        report_path = generation_dir / "reconciliation.json"
         LOGGER.info(
             "Run %s complete: accepted=%d rejected=%d duplicates_removed=%d; "
             "median baseline=%.3fs optimized=%.3fs; report=%s",
@@ -266,6 +387,8 @@ def main() -> None:
         LOGGER.exception("Order pipeline execution failed")
         raise SystemExit(1) from None
     finally:
+        if staging_dir is not None and staging_dir.exists():
+            shutil.rmtree(staging_dir)
         for frame in (orders, products, customers):
             if frame is not None:
                 frame.unpersist()
